@@ -2,6 +2,7 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using System.Threading;
 
 class Program
 {
@@ -16,16 +17,19 @@ class Program
         }
 
         var botClient = new TelegramBotClient(botToken);
+
         var me = await botClient.GetMeAsync();
         Console.WriteLine($"✅ Бот @{me.Username} запущен.");
 
-        using var cts = new CancellationTokenSource();
+        var cts = new CancellationTokenSource();
 
         var receiverOptions = new ReceiverOptions
         {
-            AllowedUpdates = Array.Empty<UpdateType>() // получать все апдейты
+            AllowedUpdates = Array.Empty<UpdateType>()
         };
 
+        Console.WriteLine("⏳ Запуск StartReceiving...");
+        
         botClient.StartReceiving(
             updateHandler: HandleUpdateAsync,
             errorHandler: HandlePollingErrorAsync,
@@ -33,14 +37,17 @@ class Program
             cancellationToken: cts.Token
         );
 
-        Console.ReadLine(); // чтобы приложение не завершилось
+        Console.WriteLine("✅ StartReceiving запущен.");
+
+        await Task.Delay(-1); // Чтобы приложение не завершилось
     }
 
     static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
         if (update.Message is { } message)
         {
-            Console.WriteLine($"Получено сообщение: {message.Text}");
+            Console.WriteLine($"📩 Получено сообщение: {message.Text} от {message.Chat.Id}");
+
             await botClient.SendTextMessageAsync(
                 chatId: message.Chat.Id,
                 text: "Я жив!",
@@ -51,7 +58,7 @@ class Program
 
     static Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
     {
-        Console.WriteLine($"Ошибка получения сообщений: {exception.Message}");
+        Console.WriteLine($"❌ Ошибка Polling: {exception.Message}");
         return Task.CompletedTask;
     }
 }
