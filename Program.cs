@@ -1,6 +1,6 @@
 using Telegram.Bot;
-using Telegram.Bot.Types;
 using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
 class Program
@@ -21,27 +21,38 @@ class Program
 
         using var cts = new CancellationTokenSource();
 
+        var receiverOptions = new ReceiverOptions
+        {
+            AllowedUpdates = Array.Empty<UpdateType>() // получать все обновления
+        };
+
         botClient.StartReceiving(
-            updateHandler: async (client, update, cancellationToken) =>
-            {
-                if (update.Message is { } message)
-                {
-                    Console.WriteLine($"Получено сообщение: {message.Text}");
-                    await client.SendTextMessageAsync(message.Chat.Id, "Я жив!");
-                }
-            },
-            pollingErrorHandler: (client, exception, cancellationToken) =>
-            {
-                Console.WriteLine($"Ошибка получения сообщений: {exception}");
-                return Task.CompletedTask;
-            },
-            receiverOptions: new ReceiverOptions
-            {
-                AllowedUpdates = Array.Empty<UpdateType>()
-            },
+            updateHandler: HandleUpdateAsync,
+            errorHandler: HandlePollingErrorAsync,
+            receiverOptions: receiverOptions,
             cancellationToken: cts.Token
         );
 
         Console.ReadLine();
+    }
+
+    static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
+    {
+        if (update.Message is { } message)
+        {
+            Console.WriteLine($"Получено сообщение: {message.Text}");
+
+            await botClient.SendTextMessageAsync(
+                chatId: message.Chat.Id,
+                text: "Я жив!",
+                cancellationToken: cancellationToken
+            );
+        }
+    }
+
+    static Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
+    {
+        Console.WriteLine($"Ошибка получения сообщений: {exception.Message}");
+        return Task.CompletedTask;
     }
 }
