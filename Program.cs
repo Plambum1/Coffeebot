@@ -23,7 +23,7 @@ class Program
 
         var receiverOptions = new ReceiverOptions
         {
-            AllowedUpdates = Array.Empty<UpdateType>() // получать все обновления
+            AllowedUpdates = Array.Empty<UpdateType>() // получать все апдейты
         };
 
         botClient.StartReceiving(
@@ -33,7 +33,7 @@ class Program
             cancellationToken: cts.Token
         );
 
-        Console.ReadLine();
+        Console.ReadLine(); // чтобы приложение не завершилось
     }
 
     static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
@@ -41,7 +41,6 @@ class Program
         if (update.Message is { } message)
         {
             Console.WriteLine($"Получено сообщение: {message.Text}");
-
             await botClient.SendTextMessageAsync(
                 chatId: message.Chat.Id,
                 text: "Я жив!",
