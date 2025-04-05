@@ -13,24 +13,38 @@ class Program
 {
     static string AdminPassword = "Igor123";
     static string? BotToken = Environment.GetEnvironmentVariable("BOT_TOKEN");
-    static string? DbConnectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
+    static string? DatabaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
     static TelegramBotClient? BotClient;
     static Dictionary<long, UserSession> Sessions = new();
 
     static async Task Main()
     {
-        if (string.IsNullOrEmpty(BotToken) || string.IsNullOrEmpty(DbConnectionString))
+        if (string.IsNullOrWhiteSpace(BotToken))
         {
-            Console.WriteLine("Переменные окружения BOT_TOKEN и DATABASE_URL не установлены.");
+            Console.WriteLine("⛔ Переменная BOT_TOKEN не установлена или пустая!");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(DatabaseUrl))
+        {
+            Console.WriteLine("⛔ Переменная DATABASE_URL не установлена или пустая!");
             return;
         }
 
         BotClient = new TelegramBotClient(BotToken);
 
         var me = await BotClient.GetMeAsync();
-        Console.WriteLine($"Бот @{me.Username} запущен.");
+        Console.WriteLine($"✅ Бот @{me.Username} запущен.");
 
-        InitDb();
+        try
+        {
+            InitDb();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⛔ Ошибка при инициализации базы данных: {ex.Message}");
+            return;
+        }
 
         using var cts = new CancellationTokenSource();
         BotClient.StartReceiving(
@@ -44,7 +58,7 @@ class Program
 
     static void InitDb()
     {
-        using var conn = new NpgsqlConnection(DbConnectionString);
+        using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
@@ -65,6 +79,13 @@ class Program
         cmd.ExecuteNonQuery();
     }
 
+    static string ConvertDatabaseUrlToConnectionString(string databaseUrl)
+    {
+        var uri = new Uri(databaseUrl);
+        var userInfo = uri.UserInfo.Split(':');
+        return $"Host={uri.Host};Port={uri.Port};Username={userInfo[0]};Password={userInfo[1]};Database={uri.AbsolutePath.TrimStart('/')};SSL Mode=Require;Trust Server Certificate=true;";
+    }
+
     static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
         if (update.Message is { } message && message.Text is not null)
@@ -77,7 +98,7 @@ class Program
     {
         Console.WriteLine(exception switch
         {
-            ApiRequestException apiRequestException => $"Telegram API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
+            ApiRequestException apiRequestException => $"Telegram API Error:\n[{apiRequestException.ErrorCode}] {apiRequestException.Message}",
             _ => exception.ToString()
         });
         return Task.CompletedTask;
@@ -131,7 +152,7 @@ class Program
 
             var key = name.ToLower().Replace(" ", "_");
 
-            using var conn = new NpgsqlConnection(DbConnectionString);
+            using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "INSERT INTO menu (key, name, price) VALUES (@k, @n, @p) ON CONFLICT (key) DO UPDATE SET name=EXCLUDED.name, price=EXCLUDED.price;";
@@ -180,7 +201,7 @@ class Program
                 }
                 var payment = query.Data == "pay_cash" ? "cash" : "card";
                 var price = menu[session.SelectedCoffee].Price;
-                using (var conn = new NpgsqlConnection(DbConnectionString))
+                using (var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!)))
                 {
                     conn.Open();
                     using var cmd = conn.CreateCommand();
@@ -209,7 +230,7 @@ class Program
 
             case "stats":
                 string statText = "📊 Статистика за сегодня:\n";
-                using (var conn = new NpgsqlConnection(DbConnectionString))
+                using (var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!)))
                 {
                     conn.Open();
                     using var cmd = conn.CreateCommand();
@@ -271,7 +292,7 @@ class Program
     static Dictionary<string, (string Name, int Price)> GetMenu()
     {
         var result = new Dictionary<string, (string, int)>();
-        using var conn = new NpgsqlConnection(DbConnectionString);
+        using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT key, name, price FROM menu;";
