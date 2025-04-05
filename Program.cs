@@ -5,13 +5,19 @@ using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 using Npgsql;
 using System.Collections.Concurrent;
+using System.Globalization;
 
 class Program
 {
+    // Конфигурация
     static string AdminPassword = "Igor123";
     static string? BotToken = Environment.GetEnvironmentVariable("BOT_TOKEN");
     static string? DatabaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
+
+    // Основные объекты
     static TelegramBotClient? BotClient;
+
+    // Храним сессии пользователей (статусы, что ждём)
     static ConcurrentDictionary<long, UserSession> Sessions = new();
 
     static async Task Main()
@@ -27,31 +33,29 @@ class Program
             return;
         }
 
+        // Создаём клиента и проверяем
         BotClient = new TelegramBotClient(BotToken);
-
         var me = await BotClient.GetMeAsync();
         Console.WriteLine($"✅ Бот @{me.Username} запущен.");
 
+        // Инициализируем БД
         InitDb();
 
+        // Запускаем Polling
         var cts = new CancellationTokenSource();
-
-        var receiverOptions = new ReceiverOptions
-        {
-            AllowedUpdates = Array.Empty<UpdateType>()
-        };
-
+        var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
         BotClient.StartReceiving(
             HandleUpdateAsync,
-            HandlePollingErrorAsync,
+            HandleErrorAsync,
             receiverOptions,
             cancellationToken: cts.Token
         );
 
-        Console.WriteLine("✅ StartReceiving запущен.");
+        Console.WriteLine("✅ StartReceiving запущен (polling). Ожидаю сообщения...");
         await Task.Delay(-1);
     }
 
+    // Инициализация БД
     static void InitDb()
     {
         using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
@@ -75,6 +79,7 @@ class Program
         cmd.ExecuteNonQuery();
     }
 
+    // Парсер строки подключения
     static string ConvertDatabaseUrlToConnectionString(string databaseUrl)
     {
         var uri = new Uri(databaseUrl);
@@ -82,53 +87,81 @@ class Program
         return $"Host={uri.Host};Port={uri.Port};Username={userInfo[0]};Password={userInfo[1]};Database={uri.AbsolutePath.TrimStart('/')};SSL Mode=Require;Trust Server Certificate=true;";
     }
 
+    // Главный обработчик апдейтов
     static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
         if (update.Message is { } message)
         {
-            Console.WriteLine($"📩 Получено сообщение: {message.Text} от {message.Chat.Id}");
+            // Лог
+            Console.WriteLine($"[Message] from {message.Chat.Id}: {message.Text}");
 
             long userId = message.Chat.Id;
             if (!Sessions.ContainsKey(userId))
                 Sessions[userId] = new UserSession();
-
             var session = Sessions[userId];
+
+            // Текст команды
             var text = message.Text!.Trim();
 
+            // Проверяем команды
             if (text == "/start")
             {
-                await BotClient!.SendTextMessageAsync(userId, "Привет! Выбери действие:", replyMarkup: GetMainMenu(), cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(
+                    chatId: userId,
+                    text: "Привет! Выбери действие:",
+                    replyMarkup: GetMainMenu(),
+                    cancellationToken: cancellationToken
+                );
                 return;
             }
 
+            // Если ждём пароль
             if (session.AwaitingPassword)
             {
                 session.AwaitingPassword = false;
                 if (text == AdminPassword)
                 {
-                    await BotClient!.SendTextMessageAsync(userId, "✅ Пароль верный!", replyMarkup: GetAdminMenu(), cancellationToken: cancellationToken);
+                    await botClient.SendTextMessageAsync(
+                        userId,
+                        "✅ Пароль верный!",
+                        replyMarkup: GetAdminMenu(),
+                        cancellationToken: cancellationToken
+                    );
                 }
                 else
                 {
-                    await BotClient!.SendTextMessageAsync(userId, "❌ Неверный пароль!", cancellationToken: cancellationToken);
+                    await botClient.SendTextMessageAsync(
+                        userId,
+                        "❌ Неверный пароль!",
+                        cancellationToken: cancellationToken
+                    );
                 }
                 return;
             }
 
+            // Если ждём ввод нового кофе
             if (session.AwaitingNewCoffee)
             {
                 session.AwaitingNewCoffee = false;
                 if (!text.Contains("-"))
                 {
-                    await BotClient!.SendTextMessageAsync(userId, "❌ Неверный формат. Используйте: Название - Цена", cancellationToken: cancellationToken);
+                    await botClient.SendTextMessageAsync(
+                        userId,
+                        "❌ Неверный формат. Используйте: Название - Цена",
+                        cancellationToken: cancellationToken
+                    );
                     return;
                 }
 
-                var parts = text.Split("-", 2);
+                var parts = text.Split('-', 2);
                 var name = parts[0].Trim();
                 if (!int.TryParse(parts[1].Trim(), out var price))
                 {
-                    await BotClient!.SendTextMessageAsync(userId, "❌ Цена должна быть числом!", cancellationToken: cancellationToken);
+                    await botClient.SendTextMessageAsync(
+                        userId,
+                        "❌ Цена должна быть числом!",
+                        cancellationToken: cancellationToken
+                    );
                     return;
                 }
 
@@ -137,80 +170,262 @@ class Program
                 using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
                 conn.Open();
                 using var cmd = conn.CreateCommand();
-                cmd.CommandText = "INSERT INTO menu (key, name, price) VALUES (@k, @n, @p) ON CONFLICT (key) DO UPDATE SET name=EXCLUDED.name, price=EXCLUDED.price;";
+                cmd.CommandText = @"INSERT INTO menu (key, name, price)
+                                    VALUES (@k, @n, @p)
+                                    ON CONFLICT (key) DO UPDATE
+                                    SET name=EXCLUDED.name, price=EXCLUDED.price;";
                 cmd.Parameters.AddWithValue("k", key);
                 cmd.Parameters.AddWithValue("n", name);
                 cmd.Parameters.AddWithValue("p", price);
                 cmd.ExecuteNonQuery();
 
                 session.LastMenuItem = key;
-                await BotClient!.SendTextMessageAsync(userId, $"✅ Напиток добавлен: {name} — {price} грн", replyMarkup: GetAdminMenu(), cancellationToken: cancellationToken);
+
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    $"✅ Напиток добавлен: {name} — {price} грн",
+                    replyMarkup: GetAdminMenu(),
+                    cancellationToken: cancellationToken
+                );
                 return;
             }
         }
         else if (update.CallbackQuery is { } query)
         {
-            await HandleCallbackQueryAsync(query, cancellationToken);
+            // Обработка кнопок
+            await HandleCallbackQueryAsync(botClient, query, cancellationToken);
         }
     }
 
-    static async Task HandleCallbackQueryAsync(CallbackQuery query, CancellationToken cancellationToken)
+    // Обработка нажатий на кнопки
+    static async Task HandleCallbackQueryAsync(ITelegramBotClient botClient, CallbackQuery query, CancellationToken cancellationToken)
     {
         long userId = query.Message!.Chat.Id;
         if (!Sessions.ContainsKey(userId))
             Sessions[userId] = new UserSession();
-
         var session = Sessions[userId];
 
-        await BotClient!.AnswerCallbackQueryAsync(query.Id, cancellationToken: cancellationToken);
+        // Убираем "часики" с кнопки
+        await botClient.AnswerCallbackQueryAsync(query.Id, cancellationToken: cancellationToken);
 
+        // Смотрим, какая кнопка
         switch (query.Data)
         {
             case "choose_coffee":
-                await BotClient.SendTextMessageAsync(userId, "☕ Выберите кофе из меню.", cancellationToken: cancellationToken);
+                // Покажем список кофе
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    "☕ Выберите напиток:",
+                    replyMarkup: GetCoffeeMenu(),
+                    cancellationToken: cancellationToken
+                );
+                break;
+
+            case var data when data.StartsWith("order_"):
+                // Пытаемся выделить ключ кофе
+                var coffeeKey = data.Split("_", 2)[1];
+                // Спросим способ оплаты
+                session.SelectedCoffee = coffeeKey;
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    $"Вы выбрали: {GetMenu()[coffeeKey].Name} ( {GetMenu()[coffeeKey].Price} грн )\nВыберите способ оплаты:",
+                    replyMarkup: GetPaymentMenu(),
+                    cancellationToken: cancellationToken
+                );
                 break;
 
             case "stats":
-                await BotClient.SendTextMessageAsync(userId, "📊 Показать статистику.", cancellationToken: cancellationToken);
+                // Показываем статистику за сегодня
+                string today = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                int total = 0;
+                string statText = $"📊 Статистика за {today}:\n";
+
+                using (var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!)))
+                {
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT coffee_key, payment, count, revenue FROM stats WHERE date=@d";
+                    cmd.Parameters.AddWithValue("d", today);
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        var ck = reader.GetString(0);
+                        var pm = reader.GetString(1);
+                        var ct = reader.GetInt32(2);
+                        var rev = reader.GetInt32(3);
+
+                        var menu = GetMenu();
+                        string coffeeName = menu.ContainsKey(ck) ? menu[ck].Name : ck;
+                        string payName = pm == "cash" ? "Наличные" : "Карта";
+
+                        statText += $"\n☕ {coffeeName} ({payName}) — {ct} шт. (Выручка: {rev} грн)";
+                        total += rev;
+                    }
+                }
+
+                statText += $"\n\n💰 Общая выручка: {total} грн";
+
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    statText,
+                    replyMarkup: GetMainMenu(),
+                    cancellationToken: cancellationToken
+                );
                 break;
 
             case "enter_password":
                 session.AwaitingPassword = true;
-                await BotClient.SendTextMessageAsync(userId, "🔑 Введите пароль:", cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    "🔑 Введите пароль:",
+                    cancellationToken: cancellationToken
+                );
+                break;
+
+            case "add_coffee":
+                session.AwaitingNewCoffee = true;
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    "Введите название и цену (Напиток - Цена)",
+                    cancellationToken: cancellationToken
+                );
                 break;
 
             case "back_main":
-                await BotClient.SendTextMessageAsync(userId, "🔙 Возвращение в главное меню:", replyMarkup: GetMainMenu(), cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    "🔙 Возвращение в главное меню.",
+                    replyMarkup: GetMainMenu(),
+                    cancellationToken: cancellationToken
+                );
+                break;
+
+            // Оплата
+            case "pay_cash":
+            case "pay_card":
+                if (session.SelectedCoffee == null)
+                {
+                    await botClient.SendTextMessageAsync(
+                        userId,
+                        "⛔ Выберите кофе сначала!",
+                        cancellationToken: cancellationToken
+                    );
+                    return;
+                }
+                var coffee = GetMenu()[session.SelectedCoffee];
+                var payment = query.Data == "pay_cash" ? "cash" : "card";
+                var price = coffee.Price;
+                var dateStr = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+                // Записываем в stats
+                using (var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!)))
+                {
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = @"
+                        INSERT INTO stats (date, coffee_key, payment, count, revenue)
+                        VALUES (@d, @k, @pm, 1, @r)
+                        ON CONFLICT (date, coffee_key, payment) DO UPDATE
+                        SET count = stats.count + 1,
+                            revenue = stats.revenue + EXCLUDED.revenue;
+                    ";
+                    cmd.Parameters.AddWithValue("d", dateStr);
+                    cmd.Parameters.AddWithValue("k", session.SelectedCoffee);
+                    cmd.Parameters.AddWithValue("pm", payment);
+                    cmd.Parameters.AddWithValue("r", price);
+                    cmd.ExecuteNonQuery();
+                }
+
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    $"☕ Заказ добавлен: {coffee.Name}, оплата: {(payment == "cash" ? "Наличные" : "Карта")}",
+                    replyMarkup: GetMainMenu(),
+                    cancellationToken: cancellationToken
+                );
+                session.SelectedCoffee = null;
                 break;
 
             default:
-                await BotClient.SendTextMessageAsync(userId, "⚠️ Неизвестная команда.", cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(
+                    userId,
+                    "⚠️ Неизвестная команда.",
+                    cancellationToken: cancellationToken
+                );
                 break;
         }
     }
 
-    static Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
+    static Task HandleErrorAsync(ITelegramBotClient botClient, Exception ex, CancellationToken cancellationToken)
     {
-        Console.WriteLine($"❌ Ошибка Polling: {exception.Message}");
+        Console.WriteLine($"[Error] {ex.Message}");
         return Task.CompletedTask;
     }
 
+    // Главное меню
     static InlineKeyboardMarkup GetMainMenu() =>
-        new InlineKeyboardMarkup(new[]
-        {
-            new[] { InlineKeyboardButton.WithCallbackData("☕ Выбрать кофе", "choose_coffee") },
-            new[] { InlineKeyboardButton.WithCallbackData("📊 Статистика (сегодня)", "stats") },
-            new[] { InlineKeyboardButton.WithCallbackData("🔧 Ввести пароль (админ)", "enter_password") },
-        });
+        new InlineKeyboardMarkup(
+            new[] {
+                new[] { InlineKeyboardButton.WithCallbackData("☕ Выбрать кофе", "choose_coffee") },
+                new[] { InlineKeyboardButton.WithCallbackData("📊 Статистика (сегодня)", "stats") },
+                new[] { InlineKeyboardButton.WithCallbackData("🔧 Ввести пароль (админ)", "enter_password") }
+            }
+        );
 
+    // Админ-меню
     static InlineKeyboardMarkup GetAdminMenu() =>
-        new InlineKeyboardMarkup(new[]
+        new InlineKeyboardMarkup(
+            new[] {
+                new[] { InlineKeyboardButton.WithCallbackData("➕ Добавить напиток", "add_coffee") },
+                new[] { InlineKeyboardButton.WithCallbackData("🔙 Назад", "back_main") }
+            }
+        );
+
+    // Меню выбора кофе (из БД)
+    static InlineKeyboardMarkup GetCoffeeMenu()
+    {
+        var menu = GetMenu();
+        var rows = new List<InlineKeyboardButton[]>();
+        foreach (var (key, (Name, Price)) in menu)
         {
-            new[] { InlineKeyboardButton.WithCallbackData("➕ Добавить напиток", "add_coffee") },
-            new[] { InlineKeyboardButton.WithCallbackData("🔙 Назад", "back_main") },
-        });
+            string btnText = $"{Name} ({Price} грн)";
+            rows.Add(new[] {
+                InlineKeyboardButton.WithCallbackData(btnText, $"order_{key}")
+            });
+        }
+        rows.Add(new[] { InlineKeyboardButton.WithCallbackData("🔙 Назад", "back_main") });
+        return new InlineKeyboardMarkup(rows);
+    }
+
+    // Меню оплаты
+    static InlineKeyboardMarkup GetPaymentMenu() =>
+        new InlineKeyboardMarkup(
+            new[] {
+                new[] { InlineKeyboardButton.WithCallbackData("💵 Наличные", "pay_cash"), InlineKeyboardButton.WithCallbackData("💳 Карта", "pay_card") },
+                new[] { InlineKeyboardButton.WithCallbackData("🔙 Назад", "choose_coffee") }
+            }
+        );
+
+    // Читаем все позиции меню из БД
+    static Dictionary<string, (string Name, int Price)> GetMenu()
+    {
+        var result = new Dictionary<string, (string, int)>();
+        using var conn = new NpgsqlConnection(ConvertDatabaseUrlToConnectionString(DatabaseUrl!));
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT key, name, price FROM menu";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            string k = reader.GetString(0);
+            string n = reader.GetString(1);
+            int p = reader.GetInt32(2);
+            result[k] = (n, p);
+        }
+        return result;
+    }
 }
 
+// Сессия пользователя: что мы от него ждём?
 class UserSession
 {
     public bool AwaitingPassword { get; set; } = false;
